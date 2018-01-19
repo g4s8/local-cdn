@@ -58,6 +58,7 @@ func main() {
 		os.Exit(0)
 	}()
 
+	fmt.Printf("starting on port %d to cache requests to %s\n", port, host)
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.OnRequest(goproxy.DstHostIs(host)).Do(goproxy.FuncReqHandler(OnRequest))
 	proxy.OnResponse(goproxy.DstHostIs(host)).Do(goproxy.FuncRespHandler(OnResponse))
