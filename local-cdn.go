@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"github.com/bclicn/color"
 	"github.com/elazarl/goproxy"
@@ -10,70 +11,117 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 )
 
 const (
-	HOST = "datum.zerocracy.com"
 	FLAG = "X-LocalCDN"
 )
 
 var (
-	cache     = make(map[string]string)
-	responses = make(map[string]*http.Response)
+	cache           = make(map[string]*Entry)
+	tmpDir          string
+	dryRun, verbose bool
+	host            string
+	port            int
 )
 
-func main() {
-	proxy := goproxy.NewProxyHttpServer()
-	//proxy.Verbose = true
+type Entry struct {
+	File   string
+	Source *http.Response
+	Hits   int
+}
 
-	tmpDir, err := ioutil.TempDir("/tmp", "local-cdn")
+func main() {
+	flag.StringVar(&host, "host", "", "host to cache")
+	flag.IntVar(&port, "port", 8010, "proxy port")
+	flag.BoolVar(&dryRun, "dry", false, "skip cache")
+	flag.BoolVar(&verbose, "verbose", false, "print cached responses and hits")
+	flag.Parse()
+
+	if host == "" {
+		flag.Usage()
+		panic("host required")
+	}
+
+	tmp, err := ioutil.TempDir("/tmp", "local-cdn")
 	if err != nil {
 		panic(err)
 	}
+	tmpDir = tmp
 
-	proxy.OnRequest(goproxy.DstHostIs(HOST)).DoFunc(
-		func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-			name := CacheName(r)
-			if responses[name] != nil {
-				fmt.Println(color.Green(fmt.Sprintf("HIT:   %s", name)))
-				r.Header.Set(FLAG, "1")
-				proto := responses[name]
-				return r, CopyResponse(proto, r, cache[name])
-			}
-			return r, nil
-		})
-	proxy.OnResponse(goproxy.DstHostIs(HOST)).DoFunc(
-		func(rsp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-			if rsp.StatusCode == 200 && ctx.Req.Method == "GET" {
-				if ctx.Req.Header.Get(FLAG) == "1" {
-					return rsp
-				}
-				tmp, err := ioutil.TempFile(tmpDir, "rsp_")
-				if err != nil {
-					panic(err)
-				}
-				defer tmp.Close()
-				if _, err := io.Copy(tmp, rsp.Body); err != nil {
-					panic(err)
-				}
-				name := CacheName(ctx.Req)
-				fmt.Println(color.Yellow(fmt.Sprintf("CACHE: %s", name)))
-				cache[name] = tmp.Name()
-				responses[name] = rsp
-				return CopyResponse(rsp, ctx.Req, tmp.Name())
-			}
-			return rsp
-		})
-	log.Fatal(http.ListenAndServe(":8010", proxy))
-	fmt.Println("cleanup...")
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+		Cleanup()
+		os.Exit(0)
+	}()
+
+	proxy := goproxy.NewProxyHttpServer()
+	proxy.OnRequest(goproxy.DstHostIs(host)).Do(goproxy.FuncReqHandler(OnRequest))
+	proxy.OnResponse(goproxy.DstHostIs(host)).Do(goproxy.FuncRespHandler(OnResponse))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), proxy))
+}
+
+func Cleanup() {
+	fmt.Print("cleaning up...")
 	if err := os.Remove(tmpDir); err != nil {
 		panic(err)
 	}
-	fmt.Println("Done!")
+	fmt.Printf("\t[done]\n")
+}
+
+func OnRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	name := CacheName(r)
+	entry := cache[name]
+	if entry != nil {
+		entry.Hits++
+		if verbose {
+			fmt.Println(color.Green(fmt.Sprintf("HIT %d: %s", entry.Hits, name)))
+		}
+		r.Header.Set(FLAG, "1")
+		return r, entry.Response(r)
+	}
+	return r, nil
+}
+
+func OnResponse(rsp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	if rsp.StatusCode == 200 && ctx.Req.Method == "GET" {
+		if ctx.Req.Header.Get(FLAG) == "1" {
+			return rsp
+		}
+		tmp, err := ioutil.TempFile(tmpDir, "rsp_")
+		if err != nil {
+			panic(err)
+		}
+		defer tmp.Close()
+		if _, err := io.Copy(tmp, rsp.Body); err != nil {
+			panic(err)
+		}
+		name := CacheName(ctx.Req)
+		if verbose {
+			fmt.Println(color.Yellow(fmt.Sprintf("CACHE: %s", name)))
+		}
+		entry := &Entry{
+			File:   tmp.Name(),
+			Source: rsp,
+			Hits:   0,
+		}
+		if !dryRun {
+			cache[name] = entry
+		}
+		return CopyResponse(rsp, ctx.Req, tmp.Name())
+	}
+	return rsp
 }
 
 func CacheName(req *http.Request) string {
 	return fmt.Sprintf("[%s][%s][%s]", req.Method, req.URL.Host, req.URL.Path)
+}
+
+func (entry *Entry) Response(req *http.Request) *http.Response {
+	return CopyResponse(entry.Source, req, entry.File)
 }
 
 func CopyResponse(proto *http.Response, req *http.Request, body string) *http.Response {
