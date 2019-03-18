@@ -8,8 +8,8 @@ merge:
   script:
     - "mkdir -pv /home/r/go/src/github.com/g4s8"
     - "ln -snv $PWD /home/r/go/src/github.com/g4s8/local-cdn"
-    - "github.com/bclicn/color"
-    - "github.com/elazarl/goproxy"
+    - "go get github.com/bclicn/color"
+    - "go get github.com/elazarl/goproxy"
     - "go build -o /dev/null ."
   fast-forward: "no"
 release:
